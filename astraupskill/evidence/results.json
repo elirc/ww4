@@ -1,0 +1,30 @@
+{
+  "passed": true,
+  "executedTests": 5,
+  "checks": [
+    {
+      "project": "_Organized Desktop/05 Numbered Experiments/ww4",
+      "id": "7dde79c7a4c0",
+      "command": [
+        "node",
+        "--experimental-vm-modules",
+        "--test",
+        "tests/issue-service-runtime.test.mjs"
+      ],
+      "cwd": "C:\\Users\\Owner\\Desktop\\AstraOrganized2\\astra-remaining-improvements\\stage\\7dde79c7a4c0",
+      "environmentOverrides": {},
+      "startedAt": "2026-09-22T04:07:59.691969+00:00",
+      "status": "complete",
+      "log": "crud-b06-astra-runtime.log",
+      "pid": 8400,
+      "exitCode": 0,
+      "passed": true,
+      "finishedAt": "2026-09-22T04:08:25.348524+00:00",
+      "elapsedSeconds": 25.65
+    }
+  ],
+  "limits": [
+    "Five cases execute actual issue creation, permission mapping, workflow helpers, custom-field validator and errors. Repository, transaction and automation persistence are adapted; no Prisma rollback, sequence concurrency, route or automation delivery execution.",
+    "Same-client checks establish argument discipline, not commit durability. Project setup/member reads precede the transaction; visibility or membership races are not addressed. No production source change."
+  ]
+}
