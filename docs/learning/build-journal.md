@@ -1,137 +1,117 @@
 # Build Journal
 
-## Stage 1 — Project Summary And Major Decisions
-- Built: The initial architectural shape for a multi-tenant Jira-like platform with projects, issues, workflows, comments, filters, boards, custom fields, and automation.
-- Decision: Include multi-tenancy because this product is realistically organization-owned, and tenant boundaries become first-class in `prisma/schema.prisma`, `src/lib/auth/request-context.ts`, and repository `organizationId` filters.
-- Decision: Use Next.js + REST instead of tRPC so request lifecycles remain explicit in `src/app/api/.../route.ts` files and easier to trace in docs.
-- Why: The project is meant to teach backend-oriented product engineering, so visible API boundaries matter more than reducing endpoint boilerplate.
+This journal records the design decisions visible in the code, the alternatives that were weighed, and, added during review, how each decision held up when checked against the final code. The "Review notes" are based only on reading this repository. They are not claims about runtime results.
 
-## Stage 2 — Schema, Auth, And Permission Foundations
-- Built: `prisma/schema.prisma`, `src/lib/auth/session.ts`, `src/lib/auth/request-context.ts`, `src/lib/permissions/permissions.ts`, and validation schemas under `src/lib/validation/`.
-- Decision: Use cookie-backed DB sessions instead of client-trusted JWT-only auth.
-- Options considered:
-  1. JWT-only sessions
-     Pros: fewer DB reads.
-     Cons: harder revocation, stale membership context.
-  2. Database-backed sessions
-     Pros: revocable, org context can be refreshed, clearer for teaching.
-     Cons: one extra lookup per request.
-- Chosen: Database-backed sessions in `src/lib/auth/session.ts`.
-- Why this won:
-  Junior engineers often notice “extra DB call”; mid-level engineers notice revocation and expiry; senior engineers care that role changes eventually reflect in auth without a migration-sized rewrite.
+## Stage 1: Project summary and major decisions
 
-## Stage 3 — Service / Repository Split
-- Built: Repositories in `src/repositories/` and services in `src/services/`.
-- Decision: Keep route handlers thin and move business logic into services, with repositories owning tenant-scoped DB access.
-- Options considered:
-  1. Business logic in routes
-     Pros: fewer files.
-     Cons: validation, auth, and workflow rules mix together quickly.
-  2. Generic helper layer only
-     Pros: less naming overhead.
-     Cons: product rules become hard to locate.
-  3. Explicit route -> service -> repository split
-     Pros: reviewable boundaries, easier tests, clear docs.
-     Cons: more files.
-- Chosen: Explicit service/repository split.
-- Why this won:
-  Junior engineers often optimize for fewer files; mid-level engineers notice duplication pressure; senior engineers care about future change isolation once workflows, permissions, and automation get more complex.
+- **Built:** The shape of a multi-tenant Jira-like tracker: projects, issues, workflows, comments, filters, a board, custom fields, and automation.
+- **Decision:** Make multi-tenancy first-class. `organizationId` is a column on 12 of the 18 models in `prisma/schema.prisma` (13 counting `Session.activeOrganizationId`), in `src/lib/auth/request-context.ts`, and in every repository read.
+- **Decision:** Use Next.js REST route handlers instead of tRPC, so each request lifecycle is one visible file under `src/app/api/.../route.ts`.
+- **Why:** The project teaches backend product engineering, and explicit API boundaries are easier to trace and document.
+- **Review notes:** Tenancy held up. Every repository read takes `organizationId`, and the only DB-level gap is that isolation is application-enforced, with no row-level security. The REST choice produced ten handlers that each follow an identical try/catch shape. The cost is that the client builds every URL by hand (`src/components/app/workspace-shell.tsx:209-306`) with no shared route table.
 
-## Stage 4 — Core Product Flows
-- Built: Project creation, issue creation/update/comment flows, board bootstrap payload, saved filters, and the main workspace client.
-- Decision: Use `src/services/bootstrap/bootstrapService.ts` to build one initial dashboard payload instead of many small first-load API calls.
-- Options considered:
-  1. One request per dashboard widget
-     Pros: easy to code incrementally.
-     Cons: more client orchestration and harder request tracing.
-  2. Aggregated bootstrap payload
-     Pros: cleaner first render and clearer learning artifact.
-     Cons: larger response.
-- Chosen: Aggregated bootstrap payload from `getWorkspaceBootstrap()`.
-- Why this won:
-  Junior engineers often focus on UI assembly speed; mid-level engineers notice network chatter; senior engineers notice that bootstrapping a page is itself a backend design problem.
+## Stage 2: Schema, auth, and permission foundations
 
-## Stage 5 — Workflow Rules And Async Automation
-- Built: `src/services/workflows/workflowService.ts`, `src/services/automation/automationService.ts`, and `src/repositories/automationRepository.ts`.
-- Decision: Queue automation in `AutomationJob` rows instead of running rules inline during issue writes.
-- Options considered:
-  1. Inline automation execution
-     Pros: fewer moving parts.
-     Cons: one broken rule can fail primary issue writes.
-  2. Queue-backed processing
-     Pros: isolated failures, auditable processing, closer to real systems.
-     Cons: more schema and service code.
-- Chosen: Queue-backed processing.
-- Why this won:
-  Junior engineers often see “extra complexity”; mid-level engineers notice resilience and auditability; senior engineers worry about coupling optional side effects to primary write latency.
+- **Built:** `prisma/schema.prisma`, `src/lib/auth/session.ts`, `src/lib/auth/request-context.ts`, `src/lib/permissions/permissions.ts`, `src/lib/validation/*`.
+- **Decision:** Cookie-backed DB sessions instead of JWTs.
+- **Options considered:**
+  1. JWT-only sessions. Pros: no DB read. Cons: hard to revoke, and membership data goes stale.
+  2. Database-backed sessions. Pros: revocable, membership reloaded per request. Cons: extra queries.
+- **Chosen:** DB sessions with a hashed opaque token (`session.ts:20-26`, `:53-58`).
+- **Why this won:** Role changes take effect on the next request without a token-refresh design.
+- **Review notes:** The extra cost turned out to be three queries per request, not one: session lookup, membership list, and a heartbeat **write** (`session.ts:92`, `:99`, `:112`). Expired rows are never purged. `jose` remains in `package.json` but unused, which suggests a JWT path was considered and then dropped. `INTERNAL_JOB_TOKEN` (`src/lib/env.ts:7`) suggests a machine-to-machine job trigger was planned, but nothing reads it.
 
-## Stage 6 — Tests And Teaching Docs
-- Built: Focused tests in `src/app/api/.../issues/route.test.ts`, `src/lib/validation/issueSchemas.test.ts`, `src/services/workflows/workflowService.test.ts`, and `src/repositories/projectRepository.test.ts`, plus the architecture/learning docs under `docs/`.
-- Decision: Favor a small number of high-signal tests over wide shallow scaffolding.
-- Why: The project goal is to demonstrate where production bugs usually enter the system, not to pad test counts.
+## Stage 3: Service and repository split
+
+- **Built:** `src/repositories/` (5 files) and `src/services/` (7 service files plus `projectTemplates.ts`).
+- **Decision:** Thin routes, services for rules, repositories for scoped DB access.
+- **Options considered:**
+  1. Logic in routes. Fewer files, but validation, auth, and rules tangle.
+  2. A generic helper layer. Less naming overhead, but rules are hard to find.
+  3. An explicit route, service, repository split. More files, but reviewable boundaries.
+- **Chosen:** Option 3.
+- **Review notes:** Routes are 24-50 lines each, which is the intended effect. The split leaks in two places: automation bypasses services and writes through repositories (`src/services/automation/automationService.ts:163-196`), and `assertAssigneeIsProjectMember` is duplicated in two services. Only two of five repositories accept a transaction client.
+
+## Stage 4: Core product flows
+
+- **Built:** Project creation, issue create, update, and comment, the bootstrap payload, saved filters, and the workspace client.
+- **Decision:** One aggregated bootstrap payload (`src/services/bootstrap/bootstrapService.ts:56-178`) instead of one request per widget.
+- **Options considered:**
+  1. One request per widget: easy to add incrementally, but chatty.
+  2. An aggregated payload: one round trip, but a larger response.
+- **Chosen:** Aggregated.
+- **Review notes:** The trade-off shows up in the invalidation strategy. Every mutation refetches the entire payload (`workspace-shell.tsx:200-204`), including every comment on every issue. Saved filters ended up client-side only (`applySavedFilter`, `workspace-shell.tsx:97-141`), which left the server filter code in `issueRepository.listIssuesForProject` unused.
+
+## Stage 5: Workflow rules and async automation
+
+- **Built:** `workflowService.ts`, `automationService.ts`, `automationRepository.ts`.
+- **Decision:** Queue automation as `AutomationJob` rows written in the issue transaction, and drain them through a separate request.
+- **Options considered:**
+  1. Inline execution: simple, but a broken rule fails the user's edit.
+  2. A queue: isolated failures and auditable state, at the cost of more code.
+- **Chosen:** Queue (a transactional outbox).
+- **Review notes:** The enqueue side is correct: the job commits atomically with the issue (`src/services/issues/issueService.ts:221-235`). The consumer side is a prototype. There is no worker, the claim has no lease or timeout, no retry, partial rule application, and failures are omitted from the response. The terminal-DONE rule is enforced, but not atomically with the write.
+
+## Stage 6: Tests and teaching docs
+
+- **Built:** Four single-case test files plus `docs/`.
+- **Decision:** A few high-signal tests rather than broad scaffolding.
+- **Review notes:** "High-signal" holds for the tenant-filter shape test. The route 403 test mocks away the permission matrix it is named after (see `docs/learning/testing-rationale.md`). No test hits a database, so neither race condition in this codebase could be caught.
+
+---
 
 ## PR Slices
 
-### Slice 1 — Tenant-aware schema, auth, and permission bedrock
-- Purpose: Establish the data model, DB session flow, and centralized RBAC before feature work.
-- Novel logic files:
-  `prisma/schema.prisma`
-  `src/lib/auth/session.ts`
-  `src/lib/auth/request-context.ts`
-  `src/lib/permissions/permissions.ts`
-  `src/lib/validation/*.ts`
-- Reviewer focus:
-  Check `prisma/schema.prisma` for consistent `organizationId` ownership on tenant-owned records.
-  Check `src/lib/auth/request-context.ts` around `requireProjectAccess()` to verify membership and permission checks happen before services run.
-  Check `src/lib/permissions/permissions.ts` to verify org admins and project roles map to the intended permissions.
-- Strong-reviewer flag: A junior reviewer might approve session logic that trusts the cookie alone; a stronger reviewer insists on server-side session lookup and expiry handling.
+The intended review order, with a focus list for each slice. Reviewer-focus items are now phrased as concrete things to verify.
 
-### Slice 2 — Project graph creation and bootstrap read model
-- Purpose: Create projects transactionally and expose a first-load dashboard payload.
-- Novel logic files:
-  `src/repositories/projectRepository.ts`
-  `src/services/projects/projectService.ts`
-  `src/services/bootstrap/bootstrapService.ts`
-  `src/app/api/bootstrap/route.ts`
-- Reviewer focus:
-  Check `src/repositories/projectRepository.ts` around `createProjectGraph()` to verify board columns and custom fields are created in the same transaction.
-  Check `src/services/bootstrap/bootstrapService.ts` for tenant-safe project selection and intentional API serialization.
-- Strong-reviewer flag: A junior reviewer might approve raw Prisma model returns; a stronger reviewer asks for a stable API shape.
+### Slice 1: Tenant-aware schema, auth, and permission bedrock
 
-### Slice 3 — Issue CRUD, comments, and workflow validation
-- Purpose: Implement the core issue-management lifecycle with state transitions and activity logging.
-- Novel logic files:
-  `src/services/issues/issueService.ts`
-  `src/services/workflows/workflowService.ts`
-  `src/repositories/issueRepository.ts`
-  `src/app/api/organizations/[organizationId]/projects/[projectId]/issues/*.ts`
-- Reviewer focus:
-  Check `src/services/issues/issueService.ts` around `validateCustomFieldValues()` and `updateIssue()` to verify custom fields and transitions are validated against project configuration.
-  Check `src/repositories/issueRepository.ts` around `findIssueForProject()` to verify all writes stay scoped by `organizationId` and `projectId`.
-- Strong-reviewer flag: A junior reviewer might approve status changes as generic patches; a stronger reviewer asks for explicit transition rules.
+- **Files:** `prisma/schema.prisma`, `src/lib/auth/session.ts`, `src/lib/auth/request-context.ts`, `src/lib/permissions/permissions.ts`, `src/lib/validation/*.ts`, `src/lib/http/*.ts`.
+- **Reviewer focus:**
+  - Every tenant-owned model has `organizationId`, or a parent that does.
+  - `requireProjectAccess` checks org membership (`request-context.ts:37`) before the project lookup (`:38`).
+  - The role matrix (`permissions.ts:31-54`) matches the product intent.
+- **Strong-reviewer flag:** Insist on hashing the session token (done, `session.ts:54`), and ask what `MEMBER` and `VIEWER` org roles are for (unanswered in code).
 
-### Slice 4 — Filters, automation, and background-style queue processing
-- Purpose: Add saved filters, automation rules, and queued job execution.
-- Novel logic files:
-  `src/services/filters/filterService.ts`
-  `src/services/automation/automationService.ts`
-  `src/repositories/automationRepository.ts`
-  `src/app/api/organizations/[organizationId]/automation/*.ts`
-- Reviewer focus:
-  Check `src/services/automation/automationService.ts` around `processPendingJobs()` to verify jobs are claimed before execution and completed/failed explicitly.
-  Check `src/repositories/automationRepository.ts` around `claimPendingJobs()` for duplicate-processing risk.
-- Strong-reviewer flag: A junior reviewer might approve inline automation side effects inside issue writes; a stronger reviewer flags the coupling and asks for queue isolation.
+### Slice 2: Project graph creation and bootstrap read model
 
-### Slice 5 — Client shell, tests, and code-anchored docs
-- Purpose: Build the UI shell that exercises the APIs and add focused enforcement tests plus learning docs.
-- Novel logic files:
-  `src/components/app/workspace-shell.tsx`
-  `src/components/auth/login-form.tsx`
-  `vitest.config.ts`
-  `src/app/api/organizations/[organizationId]/projects/[projectId]/issues/route.test.ts`
-  `docs/architecture/*`
-  `docs/learning/*`
-- Reviewer focus:
-  Check `src/components/app/workspace-shell.tsx` to ensure it only consumes APIs and does not reimplement backend logic.
-  Check `src/app/api/organizations/[organizationId]/projects/[projectId]/issues/route.test.ts` and `src/repositories/projectRepository.test.ts` to verify the tests are protecting the right failure modes.
-- Strong-reviewer flag: A junior reviewer might approve UI-only permission hiding as “secure enough”; a stronger reviewer checks that server tests still prove rejection paths.
+- **Files:** `src/repositories/projectRepository.ts`, `src/services/projects/projectService.ts`, `src/services/projects/projectTemplates.ts`, `src/services/bootstrap/bootstrapService.ts`, `src/app/api/bootstrap/route.ts`, `src/app/api/organizations/[organizationId]/projects/route.ts`.
+- **Reviewer focus:**
+  - Board columns and custom fields are created in the same `$transaction` as the project (`projectRepository.ts:188-262`).
+  - Bootstrap serializes explicitly instead of returning Prisma rows.
+- **Strong-reviewer flag:** The key-uniqueness pre-check (`projectService.ts:49-56`) races with the insert. Ask for P2002 to be mapped to 409.
+
+### Slice 3: Issue CRUD, comments, and workflow validation
+
+- **Files:** `src/services/issues/issueService.ts`, `src/services/workflows/workflowService.ts`, `src/repositories/issueRepository.ts`, the three issue route files.
+- **Reviewer focus:**
+  - `validateCustomFieldValues` (`issueService.ts:40-111`) runs against DB config, not client hints.
+  - Every issue write uses the three-key `where`.
+- **Strong-reviewer flag:** Status changes need an optimistic guard (`where: { statusId: current }`). Sequence numbers need a race-safe allocator.
+
+### Slice 4: Filters, automation, and queue processing
+
+- **Files:** `src/services/filters/filterService.ts`, `src/repositories/filterRepository.ts`, `src/services/automation/automationService.ts`, `src/repositories/automationRepository.ts`, the filters, rules, and process routes.
+- **Reviewer focus:**
+  - Jobs are claimed with compare-and-set before execution (`automationRepository.ts:65-82`).
+  - Each job ends in `COMPLETED` or `FAILED`.
+- **Strong-reviewer flag:** Ask about stuck `PROCESSING` rows, retries, idempotency per rule, and validating rule conditions and assignees when the rule is created.
+
+### Slice 5: Client shell, tests, and docs
+
+- **Files:** `src/components/app/*.tsx`, `src/components/auth/login-form.tsx`, `src/hooks/use-workspace-bootstrap.ts`, `vitest.config.ts`, the four test files, `docs/`.
+- **Reviewer focus:**
+  - The client only consumes APIs.
+  - Tests protect real failure modes.
+- **Strong-reviewer flag:** The client permission helper duplicates the server matrix and already disagrees with it (Create Project for `LEAD`). The issue form always sends `statusId`, which turns every edit into a "transition" with an automation event.
+
+---
+
+## Senior review summary (top findings, ranked)
+
+1. **Every UI save is a status transition.** `workspace-shell.tsx:571` always sends `statusId`, and `issueService.ts:350` and `:364-381` treat any present `statusId` as a transition. Result: misleading activity rows and spurious `ISSUE_STATUS_CHANGED` jobs. With the seeded rule, a done issue gets a fresh QA comment every time it is edited and the queue is processed.
+2. **The transition check is not atomic with the write** (`issueService.ts:290-314`). Concurrent PATCHes can move an issue out of DONE.
+3. **Issue sequence allocation races** (`issueRepository.ts:152-164`). The loser gets a generic 500 because `handleRouteError` does not map Prisma errors.
+4. **Automation consumer gaps:** partial rule application, no retry, no reclaim of `PROCESSING`, and conditions evaluated against a stale snapshot.
+5. **Client/server RBAC drift:** `LEAD` sees Create Project, and the server always answers 403.
+6. **Login email enumeration through timing** (`authService.ts:21-29`), and no rate limiting.
